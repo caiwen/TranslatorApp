@@ -1,18 +1,34 @@
 import os
+import json
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk, simpledialog
-from utils.excel_utils import get_columns, read_excel, write_excel
+from tkinter import filedialog, messagebox, ttk
+from utils.excel_utils import read_excel, write_excel
 from translators.google_translator import GoogleTranslator
 from translators.openai_translator import OpenAITranslator
 import threading
 from queue import Queue
 
+CONFIG_FILE = "config.json"
+
 LANGUAGES = {
     "英文": "en",
+    "中文": "zh-cn",
     "日文": "ja",
     "德文": "de",
     "法文": "fr",
-    "中文": "zh-cn"
+    "西班牙语": "es",
+    "意大利语": "it",
+    "葡萄牙语": "pt",
+    "荷兰语": "nl",
+    "瑞典语": "sv",
+    "俄语": "ru",
+    "丹麦语": "da",
+    "挪威语": "no",
+    "芬兰语": "fi",
+    "波兰语": "pl",
+    "捷克语": "cs",
+    "希腊语": "el",
+    "土耳其语": "tr",
 }
 
 class TranslatorApp:
@@ -24,9 +40,17 @@ class TranslatorApp:
         self.output_dir = ""
         self.columns = []
         self.column_vars = {}
+        self.config = self.load_config()
 
         self.task_queue = Queue()
         self.progress_queue = Queue()
+
+        # 菜单
+        menubar = tk.Menu(root)
+        settings_menu = tk.Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="配置 OpenAI API Key", command=self.set_openai_api_key)
+        menubar.add_cascade(label="设置", menu=settings_menu)
+        root.config(menu=menubar)
 
         # 文件选择
         tk.Button(root, text="选择Excel文件", command=self.choose_file).pack(pady=5)
@@ -74,6 +98,24 @@ class TranslatorApp:
         # GUI 定时更新
         self.root.after(100, self.update_progress)
 
+    # 配置 OpenAI API Key
+    def set_openai_api_key(self):
+        api_key = tk.simpledialog.askstring("OpenAI API Key", "请输入OpenAI API Key：", show="*")
+        if api_key:
+            self.config["openai_api_key"] = api_key
+            self.save_config()
+            messagebox.showinfo("成功", "OpenAI API Key 已保存")
+
+    def load_config(self):
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {}
+
+    def save_config(self):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.config, f, ensure_ascii=False, indent=4)
+
     # 文件选择
     def choose_file(self):
         self.file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
@@ -117,7 +159,7 @@ class TranslatorApp:
     def start_translation_thread(self):
         threading.Thread(target=self.translate_file, daemon=True).start()
 
-    # 翻译逻辑（线程安全）
+    # 翻译逻辑（追加列）
     def translate_file(self):
         if not self.file_path or not self.output_dir:
             self.progress_queue.put(("error", "请先选择文件和导出文件夹"))
@@ -141,42 +183,38 @@ class TranslatorApp:
         if plugin_choice == "Google":
             translator = GoogleTranslator()
         else:
-            api_key = simpledialog.askstring("OpenAI API Key", "请输入OpenAI API Key")
+            api_key = self.config.get("openai_api_key", "")
             if not api_key:
-                self.progress_queue.put(("error", "必须输入OpenAI API Key"))
+                self.progress_queue.put(("error", "请先在设置中配置 OpenAI API Key"))
                 return
             translator = OpenAITranslator(api_key=api_key)
 
-        _, data = read_excel(self.file_path)
-        total_tasks = len(selected_languages) * len(data)
+        all_columns, data = read_excel(self.file_path)
+        total_tasks = len(selected_columns) * len(selected_languages) * len(data)
         completed_tasks = 0
 
-        for lang_name in selected_languages:
-            lang_code = LANGUAGES[lang_name]
-            translated_data = []
-            for row in data:
-                new_row = {}
-                for col, val in row.items():
-                    if col in selected_columns:
-                        val_str = "" if val is None else str(val)
-                        new_row[col] = translator.translate(val_str, lang_code)
-                    else:
-                        new_row[col] = val
-                translated_data.append(new_row)
+        # 遍历选中列和语言进行翻译，并在原数据追加列
+        for col in selected_columns:
+            for lang_name in selected_languages:
+                lang_code = LANGUAGES[lang_name]
+                new_col_name = f"{col}_{lang_code.upper()}"
+                for row in data:
+                    val = row.get(col, "")
+                    val_str = "" if val is None else str(val)
+                    row[new_col_name] = translator.translate(val_str, lang_code)
 
-                # 更新进度队列
-                completed_tasks += 1
-                progress = completed_tasks / total_tasks * 100
-                self.progress_queue.put(("progress", progress, completed_tasks, total_tasks))
+                    # 更新进度
+                    completed_tasks += 1
+                    progress = completed_tasks / total_tasks * 100
+                    self.progress_queue.put(("progress", progress, completed_tasks, total_tasks))
 
-            # 保存 Excel
-            output_file = os.path.join(
-                self.output_dir,
-                f"{os.path.splitext(os.path.basename(self.file_path))[0]}_{lang_code}.xlsx"
-            )
-            write_excel(translated_data, output_file)
-
-        self.progress_queue.put(("done", "翻译完成！"))
+        # 保存 Excel（覆盖原文件或生成新文件）
+        output_file = os.path.join(
+            self.output_dir,
+            os.path.basename(self.file_path)
+        )
+        write_excel(data, output_file)
+        self.progress_queue.put(("done", f"翻译完成，已在文件中追加列: {output_file}"))
 
     # GUI 定时更新函数
     def update_progress(self):
@@ -198,6 +236,7 @@ class TranslatorApp:
         except:
             pass
         self.root.after(100, self.update_progress)
+
 
 if __name__ == "__main__":
     root = tk.Tk()
